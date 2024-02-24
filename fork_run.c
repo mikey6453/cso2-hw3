@@ -3,76 +3,75 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
-#include <fcntl.h>
 
 char *getoutput(const char *command) {
-    int pipefd[2];
-    if (pipe(pipefd) == -1) {
+    int fds[2];
+    if (pipe(fds) == -1) {
         return NULL;
     }
-
-    pid_t pid = fork();
-    if (pid == -1) {
-        close(pipefd[0]);
-        close(pipefd[1]);
+    pid_t childPid = fork();
+    if (childPid == -1) {
+        close(fds[0]);
+        close(fds[1]);
         return NULL;
-    } else if (pid == 0) {
-        dup2(pipefd[1], STDOUT_FILENO);
-        close(pipefd[0]);
-        close(pipefd[1]);
+    } else if (childPid == 0) {
+        dup2(fds[1], STDOUT_FILENO);
+        close(fds[0]);
+        close(fds[1]);
         execl("/bin/sh", "sh", "-c", command, NULL);
         _exit(EXIT_FAILURE);
     } else {
-        close(pipefd[1]);
-        char *buf = malloc(4096);
-        FILE *file_pointer = fdopen(pipefd[0], "r");
-        size_t t = 4096;
-        getdelim(&buf, &t, '\0', file_pointer);
-        fclose(file_pointer);
+        close(fds[1]);
+        FILE *stream = fdopen(fds[0], "r");
+        char *buffer = malloc(4096);
+        size_t bufferSize = 4096;
+        getdelim(&buffer, &bufferSize, '\0', stream);
+        fclose(stream);
         int status;
-        waitpid(pid, &status, 0);
-        return buf;
+        waitpid(childPid, &status, 0);
+        return buffer;
     }
 }
 
-char *parallelgetoutput(int count, const char *commands[][20]) {
-    int pipefd[2];
-    if (pipe(pipefd) == -1) {
-        perror("pipe");
-        return NULL;
-    }
-
-    pid_t pids[count];
-
-    for (int i = 0; i < count; i++) {
-        pids[i] = fork();
-        if (pids[i] == 0) {
-            dup2(pipefd[1], STDOUT_FILENO);
-            close(pipefd[0]);
-            close(pipefd[1]);
-            execvp(commands[i][0], (char *const *)commands[i]);
-            perror("execvp");
-            _exit(EXIT_FAILURE);
+char *parallelgetoutput(int numCommands, const char **commands) {
+    int fds[2];
+    pipe(fds);
+    pid_t pidArray[numCommands];
+    for (int i = 0; i < numCommands; i++) {
+        pid_t pid = fork();
+        if (pid == 0) {
+            close(fds[0]);
+            char commandIndex[10];
+            snprintf(commandIndex, sizeof(commandIndex), "%d", i);
+            const char *args[10];
+            int argIndex;
+            for (argIndex = 0; commands[argIndex] != NULL; argIndex++) {
+                args[argIndex] = commands[argIndex];
+            }
+            args[argIndex++] = commandIndex;
+            args[argIndex] = NULL;
+            dup2(fds[1], STDOUT_FILENO);
+            close(fds[1]);
+            execv(commands[0], (char * const *)args);
+        } else {
+            pidArray[i] = pid;
         }
     }
 
-    close(pipefd[1]);
-
-    char *output = NULL;
-    size_t size = 0;
-    ssize_t nread;
-    char buffer[4096];
-    while ((nread = read(pipefd[0], buffer, sizeof(buffer))) > 0) {
-        output = realloc(output, size + nread + 1);
-        memcpy(output + size, buffer, nread);
-        size += nread;
+    close(fds[1]);
+    for (int i = 0; i < numCommands; i++) {
+        waitpid(pidArray[i], NULL, 0);
     }
-    output[size] = '\0';
-
-    for (int i = 0; i < count; i++) {
-        waitpid(pids[i], NULL, 0);
+    char *combinedOutput = NULL;
+    size_t combinedSize = 0;
+    char readBuffer[4096];
+    ssize_t bytesRead;
+    while ((bytesRead = read(fds[0], readBuffer, sizeof(readBuffer))) > 0) {
+        combinedOutput = realloc(combinedOutput, combinedSize + bytesRead + 1);
+        memcpy(combinedOutput + combinedSize, readBuffer, bytesRead);
+        combinedSize += bytesRead;
     }
-
-    close(pipefd[0]);
-    return output;
+    close(fds[0]);
+    combinedOutput[combinedSize] = '\0';
+    return combinedOutput;
 }
